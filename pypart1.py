@@ -39,11 +39,6 @@ CONFIG = {
 }
 
 # ── Reproducibility ──────────────────────────────────────────────────────────
-# All four RNGs must be seeded independently:
-#   random            → used by random.choices() in corruption sampling
-#   numpy             → used by any np.random calls
-#   torch             → CPU RNG for model weight init and dropout
-#   torch.cuda (all)  → seeds every GPU; required for multi-GPU runs (device_map="auto")
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -64,18 +59,6 @@ else:
     print("  WARNING: no CUDA device — inference will be very slow on CPU.")
 
 # ── Load DUDE QA data ─────────────────────────────────────────────────────────
-# DUDE record fields:
-#   questionId      — unique int ID
-#   question        — question text
-#   doc_id          — document identifier (e.g. 'pybv0228')
-#   page_ids        — ordered list of page IDs in the document window
-#   answers         — list of accepted answer strings
-#   answer_page_idx — index into page_ids for the page that contains the answer
-#   data_split      — 'train' / 'val' / 'test'
-#
-# Images live at: {images_dir}/{page_id}.png
-# We use page_ids[answer_page_idx] to identify the exact page shown to the model.
-
 print(f"\nLoading DUDE QAs from {CONFIG['qa_file']} …")
 with open(CONFIG["qa_file"]) as f:
     raw = json.load(f)
@@ -90,22 +73,12 @@ answerable = [
 ]
 print(f"  Answerable records    : {len(answerable)}")
 
-# Pre-filter to records where at least one corruption type will find a keyword.
-# Without this, ~50% of sampled questions get silently skipped (abstract DUDE
-# questions like "What is the subject?" have no entity/element/layout/integer).
-# Sampling from corruptible records guarantees num_samples actual candidates.
 _element_kws = set(["table","figure","chart","graph","footnote","section",
                     "appendix","diagram","box","list"])
 _layout_kws  = set(["top","bottom","left","right","upper","lower","first","last",
                     "header","footer","above","below","beginning","end","next","previous"])
 
 def _is_corruptible(q: str) -> bool:
-    # Checks without spaCy (which loads later) — three sufficient conditions:
-    #   1. contains a digit  → corrupt_nlp_entity integer fallback will fire
-    #   2. contains an element keyword → corrupt_element will fire
-    #   3. contains a layout keyword   → corrupt_layout will fire
-    # Questions with NER entities but no digits are rare in DUDE; any that
-    # slip through are caught by the skipped counter in the generation loop.
     words = set(re.findall(r'\b\w+\b', q.lower()))
     return (bool(re.search(r'\b\d+\b', q))
             or bool(words & _element_kws)
@@ -142,9 +115,6 @@ except (ImportError, OSError):
     nlp = spacy.load("en_core_web_sm")
 print(f"\nspaCy {spacy.__version__} ready.")
 
-# Replacement pools keyed by spaCy NER label.
-# Each pool must be large enough that pick_replacement always finds a value
-# different from the original — keep at least 5 entries per label.
 ENTITY_POOLS = {
     "DATE":     ["January 2020", "March 2019", "December 2021", "Q3 2022",
                  "FY2023", "2018", "2024", "April 2021", "June 2017"],
@@ -199,8 +169,6 @@ def pick_replacement(pool: list, original: str):
 
 
 # ── Individual corruption functions ──────────────────────────────────────────
-# Each returns {"question": str, "detail": dict} or None if no match found.
-
 def corrupt_nlp_entity(question: str):
     """Replace a spaCy-detected named entity with a pool value of the same type.
     Falls back to replacing the first inline integer if no entity is found."""
@@ -263,11 +231,6 @@ CORRUPTION_FNS = {
 }
 
 # ── Combined corruption ───────────────────────────────────────────────────────
-# Applies TWO different corruption types sequentially on the same question.
-# The second operates on the already-modified text, so both changes are present
-# simultaneously — harder to answer and richer for the benchmark.
-#
-# Pairs tried in priority order (most likely to both succeed first):
 COMBINED_PAIRS = [
     ("nlp_entity", "element"),
     ("nlp_entity", "layout"),
@@ -292,8 +255,6 @@ def corrupt_combined(question: str):
 
 
 # ── apply_corruption: unified entry point ────────────────────────────────────
-# Tries the preferred type first; falls back through remaining singles, then
-# combined. Returns (result_dict, used_type_str) or (None, None).
 FALLBACK_ORDER = ["nlp_entity", "element", "layout"]
 
 def apply_corruption(question: str, preferred_type: str):
@@ -329,14 +290,6 @@ print("Corruption functions ready.")
 print("Types available:", FALLBACK_ORDER + ["combined"])
 
 # ── Generate corrupted candidates ─────────────────────────────────────────────
-# For each sampled record we:
-#   1. Pick a preferred corruption type from the configured distribution
-#   2. Apply it (with automatic fallback if the preferred type finds no keyword)
-#   3. Store original + corrupted question alongside all metadata needed later
-#      for the judge and the benchmark
-#
-# Results are cached to disk so re-running the script skips this expensive step.
-
 candidates_path = Path(CONFIG["data_dir"]) / "corrupted_candidates.json"
 
 corruption_types  = list(CONFIG["corruption_distribution"].keys())
@@ -361,9 +314,6 @@ else:
             skipped += 1
             continue
 
-        # answer_page is the single page that contains the answer.
-        # We store it so downstream steps (judge, benchmark) can load the right image
-        # without re-parsing page_ids + answer_page_idx every time.
         answer_page = record["page_ids"][record["answer_page_idx"]]
 
         corrupted_data.append({
@@ -408,17 +358,6 @@ for item in corrupted_data:
         print(f"  Change    : '{det['original']}' → '{det['replacement']}'")
 
 # ── LLM-as-a-Judge ────────────────────────────────────────────────────────────
-# Goal: keep only corrupted questions that a Vision LLM confirms are genuinely
-# unanswerable from the document image.
-#
-# Why a judge?  Corruption is purely text-based (keyword swap), so it can
-# accidentally produce a question that is STILL answerable — e.g. swapping
-# "Table 1" → "Table 4" when the doc actually has a Table 4.
-# The judge catches these false positives before they pollute the benchmark.
-#
-# Model choice: Qwen2.5-VL-7B-Instruct — specialized for document understanding,
-# NOT one of the models benchmarked in Part 2 (avoids circular evaluation).
-
 dataset_path = Path(CONFIG["data_dir"]) / "corrupted_dataset.json"
 
 if dataset_path.exists():
@@ -462,8 +401,6 @@ else:
     print("Ready.  Device map:", judge_model.hf_device_map)
 
     # ── Judge prompt ──────────────────────────────────────────────────────────
-    # Binary forced-choice: single-word reply prevents verbose justifications
-    # that would make parsing unreliable.
     JUDGE_PROMPT = (
         "You are a quality-control system for a document question-answering benchmark.\n"
         "Examine the document image carefully.\n"
@@ -497,7 +434,6 @@ else:
         response = processor.decode(out[0][input_len:], skip_special_tokens=True).strip().upper()
         return "UNANSWERABLE" if "UNANSWERABLE" in response else "ANSWERABLE"
 
-    # ── Run judging ───────────────────────────────────────────────────────────
     verified_data = []
     rejected = 0
 
@@ -517,15 +453,13 @@ else:
     print(f"Pass rate       : {len(verified_data) / max(len(to_judge), 1):.1%}")
     print("Kept by type    :", dict(Counter(d["corruption_type"] for d in verified_data)))
 
-    # ── Unload judge to free GPU memory before Part 2 ────────────────────────
-    # Two large VLMs must never be in VRAM simultaneously on this machine.
+    # ── Unload judge to free GPU memory ──────────────────────────────────────
     import gc
     del judge_model, processor
     gc.collect()
     torch.cuda.empty_cache()
     print("Judge model unloaded.")
 
-    # ── Save final verified dataset ───────────────────────────────────────────
     with open(dataset_path, "w") as f:
         json.dump(verified_data, f, indent=2)
     print(f"Saved {len(verified_data)} samples → {dataset_path}")

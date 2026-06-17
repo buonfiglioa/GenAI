@@ -54,14 +54,6 @@ if torch.cuda.is_available():
         print(f"  GPU {i}: {props.name}  {props.total_memory / 1e9:.1f} GB")
 
 # ── Build benchmark dataset ───────────────────────────────────────────────────
-# For each verified unanswerable sample we create TWO evaluation rows:
-#   - ANSWERABLE   : original question + same document image  (label = 1)
-#   - UNANSWERABLE : corrupted question + same document image (label = 0)
-#
-# This paired design keeps images identical across both classes so the model
-# cannot exploit any document-level bias — the only difference is the question.
-# The result is a perfectly balanced binary classification dataset.
-
 print(f"\nLoading verified dataset from {CONFIG['dataset_path']} …")
 with open(CONFIG["dataset_path"]) as f:
     verified = json.load(f)
@@ -104,8 +96,6 @@ print(f"  Benchmark rows     : {len(samples)}  ({len(samples)//2} pairs, perfect
 print(f"  Corruption types   : {dict(Counter(s['corruption_type'] for s in samples if s['label_int']==0))}")
 
 # ── Inference prompt ──────────────────────────────────────────────────────────
-# Identical prompt used for all models — fair comparison requires no model-
-# specific tuning of the prompt wording.
 BENCHMARK_PROMPT = (
     "You are evaluating a document question-answering system.\n"
     "Look at the document image carefully.\n"
@@ -139,9 +129,6 @@ def predict(processor, model, input_device, pil_image: Image.Image, question: st
     return "UNANSWERABLE" if "UNANSWERABLE" in response else "ANSWERABLE"
 
 # ── Per-model evaluation loop ─────────────────────────────────────────────────
-# Each model is loaded, evaluated over all samples, then FULLY unloaded before
-# the next model loads. Two large VLMs must never coexist in VRAM.
-
 from transformers import AutoProcessor
 try:
     from transformers import AutoModelForImageTextToText
@@ -237,7 +224,6 @@ for name, res in all_results.items():
           f"{res['unanswerable_f1']:>10.3f} {res['unanswerable_recall']:>11.3f}")
 
 # ── Per corruption-type recall (unanswerable class only) ──────────────────────
-# This reveals WHICH corruption type each model struggles to detect.
 print("\n=== Unanswerable recall by corruption type ===")
 ctypes = sorted(set(s["corruption_type"] for s in samples if s["label"] == "UNANSWERABLE"))
 print(f"{'Model':<35}", end="")
