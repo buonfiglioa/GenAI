@@ -25,7 +25,9 @@ CONFIG = {
     "models": [
         "google/gemma-3-4b-it",
         "google/gemma-3-12b-it",
-        "Qwen/Qwen2-VL-2B-Instruct",
+        "HuggingFaceTB/SmolVLM-Instruct",
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        "OpenGVLab/InternVL3-4B",
     ],
     # ---- output ----
     "data_dir":    "data",
@@ -105,6 +107,7 @@ BENCHMARK_PROMPT = (
 )
 
 _MAX_SIDE = 2048
+BATCH_SIZE = 8
 
 def _prepare_image(img: Image.Image) -> Image.Image:
     img = img.convert("RGB")
@@ -114,34 +117,52 @@ def _prepare_image(img: Image.Image) -> Image.Image:
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     return img
 
-def predict(processor, model, input_device, pil_image: Image.Image, question: str, model_name: str = "") -> str:
-    pil_image = _prepare_image(pil_image)
-    prompt_text = BENCHMARK_PROMPT.format(question=question)
+def _chunked(lst: list, n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
-    if "qwen2-vl" in model_name.lower():
-        from qwen_vl_utils import process_vision_info
-        messages = [{"role": "user", "content": [
-            {"type": "image", "image": pil_image},
-            {"type": "text", "text": prompt_text},
-        ]}]
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = processor(
-            text=[text], images=image_inputs, videos=video_inputs, return_tensors="pt"
-        ).to(input_device)
-    else:
-        messages = [{"role": "user", "content": [
-            {"type": "image"},
-            {"type": "text", "text": prompt_text},
-        ]}]
-        text = processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = processor(text=text, images=[pil_image], return_tensors="pt").to(input_device)
+def _apply_chat_template(processor, messages: list) -> str:
+    try:
+        return processor.apply_chat_template(messages, add_generation_prompt=True)
+    except (ValueError, AttributeError):
+        return processor.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
+        )
+
+def _build_inputs(processor, model_name: str, pil_images: list, prompt_texts: list, input_device):
+    if "InternVL" in model_name:
+        # InternVL3 expects <image>\n prefix in text rather than content-list format
+        messages_batch = [
+            [{"role": "user", "content": f"<image>\n{pt}"}]
+            for pt in prompt_texts
+        ]
+        texts = [
+            processor.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+            for m in messages_batch
+        ]
+        return processor(text=texts, images=pil_images, return_tensors="pt", padding=True).to(input_device)
+    messages_batch = [
+        [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": pt}]}]
+        for pt in prompt_texts
+    ]
+    texts = [_apply_chat_template(processor, m) for m in messages_batch]
+    return processor(text=texts, images=[[img] for img in pil_images], return_tensors="pt", padding=True).to(input_device)
+
+def predict_batch(processor, model, input_device,
+                  pil_images: list, questions: list, model_name: str = "") -> list:
+    pil_images   = [_prepare_image(img) for img in pil_images]
+    prompt_texts = [BENCHMARK_PROMPT.format(question=q) for q in questions]
+
+    inputs = _build_inputs(processor, model_name, pil_images, prompt_texts, input_device)
 
     with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=10, do_sample=False)
+        out = model.generate(**inputs, max_new_tokens=128, do_sample=False)
     input_len = inputs["input_ids"].shape[1]
-    response = processor.decode(out[0][input_len:], skip_special_tokens=True).strip().upper()
-    return "UNANSWERABLE" if "UNANSWERABLE" in response else "ANSWERABLE"
+    results = []
+    for i in range(len(pil_images)):
+        resp = processor.decode(out[i][input_len:], skip_special_tokens=True).strip().upper()
+        results.append("UNANSWERABLE" if "UNANSWERABLE" in resp else "ANSWERABLE")
+    return results
 
 # ── Per-model evaluation loop ─────────────────────────────────────────────────
 from transformers import AutoProcessor
@@ -170,6 +191,7 @@ for model_name in CONFIG["models"]:
     print(f"{'='*60}")
 
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+    processor.tokenizer.padding_side = "left"
     model = ModelClass.from_pretrained(
         model_name,
         device_map="auto",
@@ -181,16 +203,18 @@ for model_name in CONFIG["models"]:
     print(f"Loaded. Device map: {model.hf_device_map}")
 
     per_sample = []
-    for s in tqdm(samples, desc=f"Evaluating {model_name.split('/')[-1]}"):
-        img = Image.open(s["image_path"])
-        pred = predict(processor, model, input_device, img, s["question"], model_name=model_name)
-        per_sample.append({
-            "questionId":      s["questionId"],
-            "corruption_type": s["corruption_type"],
-            "label":           s["label"],
-            "prediction":      pred,
-            "correct":         pred == s["label"],
-        })
+    for chunk in tqdm(list(_chunked(samples, BATCH_SIZE)), desc=f"Evaluating {model_name.split('/')[-1]}"):
+        imgs  = [Image.open(s["image_path"]) for s in chunk]
+        preds = predict_batch(processor, model, input_device, imgs,
+                              [s["question"] for s in chunk], model_name=model_name)
+        for s, pred in zip(chunk, preds):
+            per_sample.append({
+                "questionId":      s["questionId"],
+                "corruption_type": s["corruption_type"],
+                "label":           s["label"],
+                "prediction":      pred,
+                "correct":         pred == s["label"],
+            })
 
     labels  = [s["label_int"] for s in samples]
     preds   = [1 if p["prediction"] == "ANSWERABLE" else 0 for p in per_sample]

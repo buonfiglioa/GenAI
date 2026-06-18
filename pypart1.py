@@ -444,7 +444,7 @@ else:
         return "UNANSWERABLE" if "UNANSWERABLE" in response else "ANSWERABLE"
 
     verified_data = []
-    rejected = 0
+    rejected_by_type: dict[str, int] = {}
 
     for item in tqdm(to_judge, desc="Judging"):
         img_path = images_dir / f"{item['answer_page']}.jpg"
@@ -454,13 +454,38 @@ else:
         if verdict == "UNANSWERABLE":
             verified_data.append(item)
         else:
-            rejected += 1
+            ctype = item["corruption_type"]
+            rejected_by_type[ctype] = rejected_by_type.get(ctype, 0) + 1
 
-    print(f"\nJudged          : {len(to_judge)}")
-    print(f"Kept (unanswerable) : {len(verified_data)}")
-    print(f"Rejected (answerable): {rejected}")
-    print(f"Pass rate       : {len(verified_data) / max(len(to_judge), 1):.1%}")
-    print("Kept by type    :", dict(Counter(d["corruption_type"] for d in verified_data)))
+    total_judged = len(to_judge)
+    total_kept = len(verified_data)
+    total_rejected = sum(rejected_by_type.values())
+    kept_by_type = dict(Counter(d["corruption_type"] for d in verified_data))
+
+    print(f"\nJudged          : {total_judged}")
+    print(f"Kept (unanswerable) : {total_kept}")
+    print(f"Rejected (answerable): {total_rejected}")
+    print(f"Pass rate       : {total_kept / max(total_judged, 1):.1%}")
+    print("Kept by type    :", kept_by_type)
+
+    judge_metrics = {
+        "judge_model":    CONFIG["judge_model"],
+        "total_judged":   total_judged,
+        "total_kept":     total_kept,
+        "total_rejected": total_rejected,
+        "pass_rate":      round(total_kept / max(total_judged, 1), 4),
+        "kept_by_type":   kept_by_type,
+        "rejected_by_type": rejected_by_type,
+        "pass_rate_by_type": {
+            ctype: round(kept_by_type.get(ctype, 0) /
+                         max(kept_by_type.get(ctype, 0) + rejected_by_type.get(ctype, 0), 1), 4)
+            for ctype in set(list(kept_by_type) + list(rejected_by_type))
+        },
+    }
+    metrics_path = Path(CONFIG["data_dir"]) / "judge_metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(judge_metrics, f, indent=2)
+    print(f"Judge metrics   → {metrics_path}")
 
     # ── Unload judge to free GPU memory ──────────────────────────────────────
     import gc
