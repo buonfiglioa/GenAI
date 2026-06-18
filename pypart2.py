@@ -25,7 +25,7 @@ CONFIG = {
     "models": [
         "google/gemma-3-4b-it",
         "google/gemma-3-12b-it",
-        "microsoft/Phi-4-multimodal-instruct",
+        "Qwen/Qwen2-VL-2B-Instruct",
     ],
     # ---- output ----
     "data_dir":    "data",
@@ -114,14 +114,29 @@ def _prepare_image(img: Image.Image) -> Image.Image:
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     return img
 
-def predict(processor, model, input_device, pil_image: Image.Image, question: str) -> str:
+def predict(processor, model, input_device, pil_image: Image.Image, question: str, model_name: str = "") -> str:
     pil_image = _prepare_image(pil_image)
-    messages = [{"role": "user", "content": [
-        {"type": "image"},
-        {"type": "text", "text": BENCHMARK_PROMPT.format(question=question)},
-    ]}]
-    text = processor.apply_chat_template(messages, add_generation_prompt=True)
-    inputs = processor(text=text, images=[pil_image], return_tensors="pt").to(input_device)
+    prompt_text = BENCHMARK_PROMPT.format(question=question)
+
+    if "qwen2-vl" in model_name.lower():
+        from qwen_vl_utils import process_vision_info
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": pil_image},
+            {"type": "text", "text": prompt_text},
+        ]}]
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = processor(
+            text=[text], images=image_inputs, videos=video_inputs, return_tensors="pt"
+        ).to(input_device)
+    else:
+        messages = [{"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": prompt_text},
+        ]}]
+        text = processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = processor(text=text, images=[pil_image], return_tensors="pt").to(input_device)
+
     with torch.no_grad():
         out = model.generate(**inputs, max_new_tokens=10, do_sample=False)
     input_len = inputs["input_ids"].shape[1]
@@ -168,7 +183,7 @@ for model_name in CONFIG["models"]:
     per_sample = []
     for s in tqdm(samples, desc=f"Evaluating {model_name.split('/')[-1]}"):
         img = Image.open(s["image_path"])
-        pred = predict(processor, model, input_device, img, s["question"])
+        pred = predict(processor, model, input_device, img, s["question"], model_name=model_name)
         per_sample.append({
             "questionId":      s["questionId"],
             "corruption_type": s["corruption_type"],

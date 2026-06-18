@@ -1,5 +1,6 @@
-import os
+import argparse
 import json
+import os
 import re
 import random
 import subprocess
@@ -8,11 +9,9 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 import torch
 from PIL import Image
-from datasets import load_dataset
 
 # Raise PIL's decompression-bomb limit — DocVQA contains very high-res scans
 Image.MAX_IMAGE_PIXELS = None
@@ -20,8 +19,8 @@ Image.MAX_IMAGE_PIXELS = None
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 CONFIG = {
     # ---- dataset ----
-    "qa_file": "data/val.json",   # DUDE val split (extracted from qas.zip)
-    "images_dir": "data/images",  # extracted from images tar; files named {page_id}.png
+    "qa_file":  "data/docvqa_val.json",   # produced by download_data.py
+    "images_dir": "data/images",          # images named {image_name}.jpg  (e.g. pybv0228_p80.jpg)
     "num_samples": 300,
     # ---- corruption ----
     # combined = apply two different types to the same question simultaneously
@@ -45,6 +44,11 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--corruption-only", action="store_true",
+                    help="Run only the corruption step and exit before loading the judge model.")
+args = parser.parse_args()
+
 set_seed(CONFIG["seed"])
 Path(CONFIG["data_dir"]).mkdir(parents=True, exist_ok=True)
 
@@ -58,20 +62,17 @@ if torch.cuda.is_available():
 else:
     print("  WARNING: no CUDA device — inference will be very slow on CPU.")
 
-# ── Load DUDE QA data ─────────────────────────────────────────────────────────
-print(f"\nLoading DUDE QAs from {CONFIG['qa_file']} …")
-with open(CONFIG["qa_file"]) as f:
-    raw = json.load(f)
+# ── Load QA data ─────────────────────────────────────────────────────────────
+qa_file = Path(CONFIG["qa_file"])
+if not qa_file.exists():
+    raise FileNotFoundError(f"{qa_file} not found — run download_data.py first.")
+print(f"\nLoading QA data from {qa_file} …")
+with open(qa_file) as f:
+    all_records = json.load(f)
+print(f"  Total records : {len(all_records)}")
 
-all_records = raw["data"]
-print(f"  Total records in file : {len(all_records)}")
-
-# Keep only records with a real answer (filter out the single null entry)
-answerable = [
-    r for r in all_records
-    if r["answers"] and not all(a.strip().lower() in ("", "none", "null") for a in r["answers"])
-]
-print(f"  Answerable records    : {len(answerable)}")
+answerable = [r for r in all_records if r.get("valid_answers")]
+print(f"  Answerable    : {len(answerable)}")
 
 _element_kws = set(["table","figure","chart","graph","footnote","section",
                     "appendix","diagram","box","list"])
@@ -95,14 +96,14 @@ print(f"  Sampled               : {len(records)}")
 
 # Quick sanity check on structure
 r0 = records[0]
-answer_page = r0["page_ids"][r0["answer_page_idx"]]
+answer_page = r0["image_name"][r0["answer_page_idx"]]
 print(f"\nExample record:")
-print(f"  questionId      : {r0['questionId']}")
+print(f"  question_id     : {r0['question_id']}")
 print(f"  question        : {r0['question']}")
-print(f"  answers         : {r0['answers']}")
-print(f"  doc_id          : {r0['doc_id']}")
-print(f"  page_ids        : {r0['page_ids'][:4]}{'...' if len(r0['page_ids']) > 4 else ''}")
-print(f"  answer_page_idx : {r0['answer_page_idx']}  →  page '{answer_page}'")
+print(f"  valid_answers   : {r0['valid_answers']}")
+print(f"  image_id        : {r0['image_id']}")
+print(f"  image_name      : {r0['image_name'][:4]}{'...' if len(r0['image_name']) > 4 else ''}")
+print(f"  answer_page_idx : {r0['answer_page_idx']}  →  '{answer_page}'")
 print(f"  expected image  : {CONFIG['images_dir']}/{answer_page}.jpg")
 
 # ── Corruption resources ──────────────────────────────────────────────────────
@@ -314,20 +315,20 @@ else:
             skipped += 1
             continue
 
-        answer_page = record["page_ids"][record["answer_page_idx"]]
+        answer_page = record["image_name"][record["answer_page_idx"]]
 
         corrupted_data.append({
-            "questionId":         record["questionId"],
-            "doc_id":             record["doc_id"],
-            "answer_page":        answer_page,          # page_id → image filename
-            "page_ids":           record["page_ids"],   # kept for windowed multi-page use
+            "questionId":         record["question_id"],
+            "doc_id":             record["image_id"],
+            "answer_page":        answer_page,          # image filename stem (no extension)
+            "page_ids":           record["image_name"], # all pages in context window
             "answer_page_idx":    record["answer_page_idx"],
             "original_question":  question,
-            "original_answers":   record["answers"],
+            "original_answers":   record["valid_answers"],
             "corrupted_question": result["question"],
             "corruption_type":    used_type,
             "corruption_detail":  result["detail"],
-            "judge_verdict":      None,                 # filled in by the judge step
+            "judge_verdict":      None,
         })
 
     print(f"\nSampled        : {len(records)}")
@@ -338,6 +339,10 @@ else:
     with open(candidates_path, "w") as f:
         json.dump(corrupted_data, f, indent=2)
     print(f"Saved → {candidates_path}")
+
+if args.corruption_only:
+    print("\n--corruption-only set: stopping before judge step.")
+    sys.exit(0)
 
 # ── Sanity-check: one example per corruption type ─────────────────────────────
 print("\n=== One example per corruption type ===")
@@ -380,6 +385,10 @@ else:
         print(f"  First missing: {missing[0]['answer_page']}.jpg")
 
     to_judge = available  # only judge records where the image exists
+
+    if not to_judge:
+        print("  No images available — run again once images are in place.")
+        sys.exit(0)
 
     # ── Load judge model ──────────────────────────────────────────────────────
     from transformers import AutoProcessor
