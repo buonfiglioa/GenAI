@@ -12,7 +12,5 @@ data/*
 !data/figures/
 data/figures/*
 !data/figures/final/
-data/figures/final/*
-!data/figures/final/.gitkeep
 qas.zip
 data_old/*
