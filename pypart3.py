@@ -27,7 +27,7 @@ CONFIG = {
         "google/gemma-3-12b-it",
         "HuggingFaceTB/SmolVLM-Instruct",
         "Qwen/Qwen2.5-VL-3B-Instruct",
-        "OpenGVLab/InternVL3-4B",
+        "google/gemma-4-E2B-it",
     ],
     "seed": 42,
 }
@@ -290,7 +290,7 @@ if mit_results_path.exists():
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
 _MAX_SIDE = 2048
-BATCH_SIZE = 8
+BATCH_SIZE = 32
 
 def _prepare_image(img: Image.Image) -> Image.Image:
     img = img.convert("RGB")
@@ -321,17 +321,6 @@ def _apply_chat_template(processor, messages: list) -> str:
         )
 
 def _build_inputs(processor, model_name: str, pil_images: list, prompt_texts: list, input_device):
-    if "InternVL" in model_name:
-        # InternVL3 expects <image>\n prefix in text rather than content-list format
-        messages_batch = [
-            [{"role": "user", "content": f"<image>\n{pt}"}]
-            for pt in prompt_texts
-        ]
-        texts = [
-            processor.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-            for m in messages_batch
-        ]
-        return processor(text=texts, images=pil_images, return_tensors="pt", padding=True).to(input_device)
     messages_batch = [
         [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": pt}]}]
         for pt in prompt_texts
@@ -451,6 +440,8 @@ for target_model in target_models:
         input_device = next(model.parameters()).device
 
 
+        pil_cache = {s["image_path"]: _prepare_image(Image.open(s["image_path"])) for s in samples}
+
         debug_log: dict = {}  # mit_name → list of raw response records
 
         for mit_name in remaining:
@@ -462,7 +453,7 @@ for target_model in target_models:
             per_sample = []
             raw_records = []
             for chunk in tqdm(list(_chunked(samples, BATCH_SIZE)), desc=f"{short}/{mit_name}"):
-                imgs    = [Image.open(s["image_path"]) for s in chunk]
+                imgs    = [pil_cache[s["image_path"]] for s in chunk]
                 results = predict_batch(
                     processor, model, input_device, imgs,
                     [s["question"] for s in chunk],

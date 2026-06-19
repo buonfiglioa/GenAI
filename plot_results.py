@@ -25,7 +25,7 @@ ALL_MODELS = [
     "google/gemma-3-12b-it",
     "HuggingFaceTB/SmolVLM-Instruct",
     "Qwen/Qwen2.5-VL-3B-Instruct",
-    "OpenGVLab/InternVL3-4B",
+    "google/gemma-4-E2B-it",
 ]
 
 MITIGATIONS = ["few_shot", "explained_few_shot", "layout_few_shot", "multi_few_shot", "skeptical"]
