@@ -12,6 +12,7 @@ data/*
 !data/corrupted_dataset.json
 !data/benchmark_results.json
 !data/mitigation_results.json
+!data/mitigation_results_gemma4.json
 !data/figures/
 data/figures/*
 !data/figures/final/
