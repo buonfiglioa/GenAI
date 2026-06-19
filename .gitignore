@@ -9,6 +9,7 @@ wheels/
 # Virtual environments
 .venv
 data/*
+!data/corrupted_dataset.json
 !data/figures/
 data/figures/*
 !data/figures/final/
