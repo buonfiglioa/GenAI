@@ -444,12 +444,12 @@ for target_model in target_models:
         model = ModelClass.from_pretrained(
             target_model,
             device_map="auto",
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             trust_remote_code=True,
         )
         model.eval()
         input_device = next(model.parameters()).device
-        print(f"  Ready. Device map: {model.hf_device_map}")
+
 
         debug_log: dict = {}  # mit_name → list of raw response records
 

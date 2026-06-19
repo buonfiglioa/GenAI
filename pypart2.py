@@ -195,12 +195,12 @@ for model_name in CONFIG["models"]:
     model = ModelClass.from_pretrained(
         model_name,
         device_map="auto",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
     )
     model.eval()
     input_device = next(model.parameters()).device
-    print(f"Loaded. Device map: {model.hf_device_map}")
+
 
     per_sample = []
     for chunk in tqdm(list(_chunked(samples, BATCH_SIZE)), desc=f"Evaluating {model_name.split('/')[-1]}"):

@@ -21,7 +21,7 @@ CONFIG = {
     # ---- dataset ----
     "qa_file":  "data/docvqa_val.json",   # produced by download_data.py
     "images_dir": "data/images",          # images named {image_name}.jpg  (e.g. pybv0228_p80.jpg)
-    "num_samples": 300,
+    "num_samples": 1000,
     # ---- corruption ----
     # combined = apply two different types to the same question simultaneously
     "corruption_distribution": {"nlp_entity": 0.25, "element": 0.20, "layout": 0.20, "combined": 0.35},
@@ -47,6 +47,8 @@ def set_seed(seed: int):
 parser = argparse.ArgumentParser()
 parser.add_argument("--corruption-only", action="store_true",
                     help="Run only the corruption step and exit before loading the judge model.")
+parser.add_argument("--force", action="store_true",
+                    help="Delete cached candidates and dataset files and rerun from scratch.")
 args = parser.parse_args()
 
 set_seed(CONFIG["seed"])
@@ -292,6 +294,13 @@ print("Types available:", FALLBACK_ORDER + ["combined"])
 
 # ── Generate corrupted candidates ─────────────────────────────────────────────
 candidates_path = Path(CONFIG["data_dir"]) / "corrupted_candidates.json"
+dataset_path = Path(CONFIG["data_dir"]) / "corrupted_dataset.json"
+
+if args.force:
+    for p in (candidates_path, dataset_path):
+        if p.exists():
+            p.unlink()
+            print(f"Deleted cache: {p}")
 
 corruption_types  = list(CONFIG["corruption_distribution"].keys())
 corruption_weights = list(CONFIG["corruption_distribution"].values())
@@ -301,6 +310,8 @@ if candidates_path.exists():
     with open(candidates_path) as f:
         corrupted_data = json.load(f)
     print(f"  Loaded {len(corrupted_data)} candidates.")
+    if len(corrupted_data) != CONFIG["num_samples"]:
+        print(f"  WARNING: cache has {len(corrupted_data)} samples but num_samples={CONFIG['num_samples']}. Run with --force to regenerate.")
     print("  Distribution:", dict(Counter(d["corruption_type"] for d in corrupted_data)))
 else:
     corrupted_data = []
@@ -363,8 +374,6 @@ for item in corrupted_data:
         print(f"  Change    : '{det['original']}' → '{det['replacement']}'")
 
 # ── LLM-as-a-Judge ────────────────────────────────────────────────────────────
-dataset_path = Path(CONFIG["data_dir"]) / "corrupted_dataset.json"
-
 if dataset_path.exists():
     print(f"\nFinal dataset already exists at {dataset_path} — skipping judge.")
     with open(dataset_path) as f:
@@ -404,10 +413,9 @@ else:
     judge_model = ModelClass.from_pretrained(
         CONFIG["judge_model"],
         device_map="auto",    # spreads across all available GPUs automatically
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
     judge_model.eval()
-    print("Ready.  Device map:", judge_model.hf_device_map)
 
     # ── Judge prompt ──────────────────────────────────────────────────────────
     JUDGE_PROMPT = (
