@@ -1,3 +1,4 @@
+import argparse
 import gc
 import json
 import random
@@ -43,6 +44,11 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--force", action="store_true",
+                    help="Delete cached results and rerun all models from scratch.")
+args = parser.parse_args()
 
 set_seed(CONFIG["seed"])
 Path(CONFIG["data_dir"]).mkdir(parents=True, exist_ok=True)
@@ -175,9 +181,13 @@ except ImportError:
 
 all_results = {}   # model_name → {predictions, labels, per_sample}
 
-# Load existing results so a crash mid-run doesn't lose finished models
-if Path(CONFIG["results_path"]).exists():
-    with open(CONFIG["results_path"]) as f:
+results_path = Path(CONFIG["results_path"])
+if args.force and results_path.exists():
+    results_path.unlink()
+    print(f"Deleted cache: {results_path}")
+
+if results_path.exists():
+    with open(results_path) as f:
         all_results = json.load(f)
     print(f"\nResuming: {list(all_results.keys())} already done.")
 
