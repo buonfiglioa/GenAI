@@ -20,14 +20,16 @@ uv run python download_data.py        # one-time data download
 uv run python pypart1.py              # requires data/docvqa_val.json + data/images/
 uv run python pypart2.py              # requires data/corrupted_dataset.json (output of pypart1)
 uv run python pypart3.py              # all models
-uv run python pypart3.py --model google/gemma-3-12b-it   # single model
-uv run python pypart3.py --debug      # log raw responses for bias analysis
+uv run python pypart3.py --model google/gemma-3-12b-it        # single model
+uv run python pypart3.py --debug                              # log raw responses for bias analysis
+uv run python pypart3.py --model google/gemma-3-4b-it --reset few_shot   # re-run one mitigation
+uv run python pypart3.py --reset                              # re-run all mitigations for all models
 uv run python plot_results.py         # regenerate final figures (no GPU needed)
 ```
 
 `pypart1.py --corruption-only` stops before loading the judge model (useful for inspecting candidates).
 
-`pypart3.py` resumes from `data/mitigation_results.json` if it already exists (per-model, per-mitigation).
+`pypart3.py` resumes from `data/mitigation_results.json` at per-mitigation granularity (a mitigation interrupted mid-run reruns from scratch). Use `--reset [MITIGATION ...]` to delete specific cached results and force a re-run; omit names to reset all mitigations for the selected models.
 
 ## Mitigations (Part 3)
 
@@ -59,4 +61,6 @@ data/figures/mitigation_delta_crossmodel.jpg
 data/figures/final/              ← consolidated final plots (all models, all mitigations)
 ```
 
-`data/` is gitignored. GPU required for pypart1–3; `plot_results.py` needs no GPU. Models are loaded one at a time via `device_map="auto"`.
+`data/` is gitignored. GPU required for pypart1–3; `plot_results.py` needs no GPU.
+
+**Part 3 GPU parallelism:** when multiple GPUs are available, small models (everything except `gemma-3-12b-it`) load one copy per GPU and run each mitigation on a separate GPU concurrently. `gemma-3-12b-it` always runs sequentially with `device_map="auto"` spread across all GPUs.

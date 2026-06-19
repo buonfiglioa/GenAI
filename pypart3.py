@@ -1,9 +1,12 @@
 import argparse
 import gc
 import json
+import os
+import queue
 import re
 import random
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -134,6 +137,15 @@ parser.add_argument(
         "Log raw model responses during inference and save them to "
         "data/debug_responses_{model}.json. Useful to diagnose systematic biases "
         "(e.g. Qwen2-VL-2B always predicting UNANSWERABLE)."
+    ),
+)
+parser.add_argument(
+    "--reset", nargs="*", metavar="MITIGATION",
+    help=(
+        "Delete cached results for the given mitigation name(s) so they are re-run. "
+        "Applies to the models selected by --model (or all models if --model is omitted). "
+        "Pass no names to reset ALL mitigations for those models. "
+        "Example: --reset few_shot skeptical"
     ),
 )
 args = parser.parse_args()
@@ -288,6 +300,22 @@ if mit_results_path.exists():
     with open(mit_results_path) as f:
         mit_results = json.load(f)
 
+if args.reset is not None:
+    to_reset = args.reset if args.reset else list(MITIGATIONS.keys())
+    unknown  = [m for m in to_reset if m not in MITIGATIONS]
+    if unknown:
+        raise ValueError(f"Unknown mitigation(s): {unknown}. Valid: {list(MITIGATIONS.keys())}")
+    for tm in target_models:
+        dropped = [m for m in to_reset if m in mit_results.get(tm, {})]
+        for m in dropped:
+            del mit_results[tm][m]
+        if dropped:
+            print(f"  Reset {dropped} for {tm.split('/')[-1]}")
+    tmp = mit_results_path.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(mit_results, f, indent=2)
+    os.replace(tmp, mit_results_path)
+
 # ── Inference helpers ─────────────────────────────────────────────────────────
 _MAX_SIDE = 2048
 BATCH_SIZE = 32
@@ -326,7 +354,11 @@ def _build_inputs(processor, model_name: str, pil_images: list, prompt_texts: li
         for pt in prompt_texts
     ]
     texts = [_apply_chat_template(processor, m) for m in messages_batch]
-    return processor(text=texts, images=[[img] for img in pil_images], return_tensors="pt", padding=True).to(input_device)
+    inputs = processor(text=texts, images=[[img] for img in pil_images], return_tensors="pt", padding=True).to(input_device)
+    for key in inputs:
+        if isinstance(inputs[key], torch.Tensor) and inputs[key].is_floating_point():
+            inputs[key] = inputs[key].to(dtype=torch.bfloat16)
+    return inputs
 
 def predict_batch(processor, model, input_device,
                   pil_images: list, questions: list,
@@ -337,7 +369,11 @@ def predict_batch(processor, model, input_device,
 
     inputs = _build_inputs(processor, model_name, pil_images, prompt_texts, input_device)
 
-    with torch.no_grad():
+    if "pixel_values" in inputs:
+        pv = inputs["pixel_values"]
+        #print(f"[dtype-debug] pixel_values shape={pv.shape} dtype={pv.dtype}", flush=True)
+
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     input_len = inputs["input_ids"].shape[1]
     results = []
@@ -391,6 +427,73 @@ def _print_debug_analysis(short: str, mit_name: str, records: list) -> None:
             print(f"               Raw: {snippet!r}")
 
 
+# ── GPU-parallel worker ───────────────────────────────────────────────────────
+# Models that cannot fit on a single GPU — must stay on device_map="auto".
+_LARGE_MODELS = {"google/gemma-3-12b-it"}
+
+def _run_mitigation_worker(
+    model_name: str,
+    samples: list,
+    mit_name: str,
+    cfg: dict,
+    pil_cache: dict,
+    debug_flag: bool,
+    gpu_pool: "queue.Queue",
+) -> "tuple[str, list, list]":
+    """Acquire a free GPU, load the model, run one mitigation, unload, release the GPU."""
+    gpu_id = gpu_pool.get()
+    device = f"cuda:{gpu_id}"
+    mdl = proc = None
+    try:
+        proc = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        proc.tokenizer.padding_side = "left"
+        mdl = ModelClass.from_pretrained(
+            model_name,
+            device_map={"": gpu_id},
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+        )
+        mdl.eval()
+        input_dev = torch.device(device)
+
+        per_sample: list = []
+        raw_records: list = []
+        for chunk in tqdm(list(_chunked(samples, BATCH_SIZE)), desc=f"GPU{gpu_id}/{mit_name}", leave=True):
+            imgs    = [pil_cache[s["image_path"]] for s in chunk]
+            results = predict_batch(
+                proc, mdl, input_dev, imgs,
+                [s["question"] for s in chunk],
+                cfg["prompt"], cfg["max_new_tokens"],
+                model_name=model_name, return_raw=debug_flag,
+            )
+            for s, result in zip(chunk, results):
+                if debug_flag:
+                    pred, raw_response = result
+                    raw_records.append({
+                        "questionId":      s["questionId"],
+                        "corruption_type": s["corruption_type"],
+                        "label":           s["label"],
+                        "question":        s["question"],
+                        "raw_response":    raw_response,
+                        "verdict":         pred,
+                    })
+                else:
+                    pred = result
+                per_sample.append({
+                    "questionId":      s["questionId"],
+                    "corruption_type": s["corruption_type"],
+                    "label":           s["label"],
+                    "prediction":      pred,
+                    "correct":         pred == s["label"],
+                })
+        return mit_name, per_sample, raw_records
+    finally:
+        del mdl, proc
+        gc.collect()
+        torch.cuda.empty_cache()
+        gpu_pool.put(gpu_id)
+
+
 # ── Per-model evaluation loop ─────────────────────────────────────────────────
 from transformers import AutoProcessor
 try:
@@ -427,59 +530,18 @@ for target_model in target_models:
         print(f"  Resuming: {done} already done.")
 
     if remaining:
-        print(f"\n  Loading {target_model} …")
-        processor = AutoProcessor.from_pretrained(target_model, trust_remote_code=True)
-        processor.tokenizer.padding_side = "left"
-        model = ModelClass.from_pretrained(
-            target_model,
-            device_map="auto",
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-        )
-        model.eval()
-        input_device = next(model.parameters()).device
+        pil_cache  = {s["image_path"]: _prepare_image(Image.open(s["image_path"])) for s in samples}
+        debug_log: dict = {}
 
+        n_gpus       = torch.cuda.device_count()
+        run_parallel = n_gpus > 1 and target_model not in _LARGE_MODELS
 
-        pil_cache = {s["image_path"]: _prepare_image(Image.open(s["image_path"])) for s in samples}
-
-        debug_log: dict = {}  # mit_name → list of raw response records
-
-        for mit_name in remaining:
+        def _record_results(mit_name: str, per_sample: list, raw_records: list) -> None:
+            """Compute metrics, update mit_results, persist to disk. Runs in main thread."""
             cfg = MITIGATIONS[mit_name]
             print(f"\n  {'='*56}")
             print(f"  Mitigation : {mit_name}  (max_new_tokens={cfg['max_new_tokens']})")
             print(f"  {'='*56}")
-
-            per_sample = []
-            raw_records = []
-            for chunk in tqdm(list(_chunked(samples, BATCH_SIZE)), desc=f"{short}/{mit_name}"):
-                imgs    = [pil_cache[s["image_path"]] for s in chunk]
-                results = predict_batch(
-                    processor, model, input_device, imgs,
-                    [s["question"] for s in chunk],
-                    cfg["prompt"], cfg["max_new_tokens"],
-                    model_name=target_model, return_raw=args.debug,
-                )
-                for s, result in zip(chunk, results):
-                    if args.debug:
-                        pred, raw_response = result
-                        raw_records.append({
-                            "questionId":      s["questionId"],
-                            "corruption_type": s["corruption_type"],
-                            "label":           s["label"],
-                            "question":        s["question"],
-                            "raw_response":    raw_response,
-                            "verdict":         pred,
-                        })
-                    else:
-                        pred = result
-                    per_sample.append({
-                        "questionId":      s["questionId"],
-                        "corruption_type": s["corruption_type"],
-                        "label":           s["label"],
-                        "prediction":      pred,
-                        "correct":         pred == s["label"],
-                    })
 
             if args.debug:
                 debug_log[mit_name] = raw_records
@@ -490,11 +552,9 @@ for target_model in target_models:
 
             acc = accuracy_score(labels, preds)
             prec,   rec,   f1,   _ = precision_recall_fscore_support(
-                labels, preds, average="binary", pos_label=1, zero_division=0
-            )
+                labels, preds, average="binary", pos_label=1, zero_division=0)
             prec_u, rec_u, f1_u, _ = precision_recall_fscore_support(
-                labels, preds, average="binary", pos_label=0, zero_division=0
-            )
+                labels, preds, average="binary", pos_label=0, zero_division=0)
 
             mit_results[target_model][mit_name] = {
                 "accuracy":               round(acc,    4),
@@ -507,23 +567,95 @@ for target_model in target_models:
                 "macro_f1":               round((f1 + f1_u) / 2, 4),
                 "per_sample":             per_sample,
             }
-
             print(f"  Accuracy : {acc:.3f}  Macro F1 : {mit_results[target_model][mit_name]['macro_f1']:.3f}  "
                   f"Unansw-F1 : {f1_u:.3f}  ΔUnansw-Rec : {rec_u - baseline_urec:+.3f}")
-
-            with open(mit_results_path, "w") as f:
+            tmp = mit_results_path.with_suffix(".tmp")
+            with open(tmp, "w") as f:
                 json.dump(mit_results, f, indent=2)
+            os.replace(tmp, mit_results_path)
+
+        if run_parallel:
+            print(f"\n  Parallel inference: {len(remaining)} mitigation(s) distributed across "
+                  f"{n_gpus} GPUs (one {short} copy per GPU).")
+            gpu_pool: queue.Queue = queue.Queue()
+            for i in range(n_gpus):
+                gpu_pool.put(i)
+
+            with ThreadPoolExecutor(max_workers=len(remaining)) as executor:
+                future_to_mit = {
+                    executor.submit(
+                        _run_mitigation_worker,
+                        target_model, samples, mit_name, MITIGATIONS[mit_name],
+                        pil_cache, args.debug, gpu_pool,
+                    ): mit_name
+                    for mit_name in remaining
+                }
+                for future in as_completed(future_to_mit):
+                    try:
+                        mit_name, per_sample, raw_records = future.result()
+                        _record_results(mit_name, per_sample, raw_records)
+                    except Exception as exc:
+                        failed_mit = future_to_mit[future]
+                        print(f"\n  Worker for mitigation '{failed_mit}' failed: {exc}")
+
+        else:
+            # Sequential: load once with device_map="auto" (required for large models).
+            print(f"\n  Loading {target_model} …")
+            processor = AutoProcessor.from_pretrained(target_model, trust_remote_code=True)
+            processor.tokenizer.padding_side = "left"
+            model = ModelClass.from_pretrained(
+                target_model,
+                device_map="auto",
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+            )
+            model.eval()
+            input_device = next(model.parameters()).device
+
+            for mit_name in remaining:
+                cfg = MITIGATIONS[mit_name]
+                per_sample  = []
+                raw_records = []
+                for chunk in tqdm(list(_chunked(samples, BATCH_SIZE)), desc=f"{short}/{mit_name}"):
+                    imgs    = [pil_cache[s["image_path"]] for s in chunk]
+                    results = predict_batch(
+                        processor, model, input_device, imgs,
+                        [s["question"] for s in chunk],
+                        cfg["prompt"], cfg["max_new_tokens"],
+                        model_name=target_model, return_raw=args.debug,
+                    )
+                    for s, result in zip(chunk, results):
+                        if args.debug:
+                            pred, raw_response = result
+                            raw_records.append({
+                                "questionId":      s["questionId"],
+                                "corruption_type": s["corruption_type"],
+                                "label":           s["label"],
+                                "question":        s["question"],
+                                "raw_response":    raw_response,
+                                "verdict":         pred,
+                            })
+                        else:
+                            pred = result
+                        per_sample.append({
+                            "questionId":      s["questionId"],
+                            "corruption_type": s["corruption_type"],
+                            "label":           s["label"],
+                            "prediction":      pred,
+                            "correct":         pred == s["label"],
+                        })
+                _record_results(mit_name, per_sample, raw_records)
+
+            del model, processor
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"\n  {short} unloaded.")
 
         if args.debug and debug_log:
             debug_path = Path(CONFIG["data_dir"]) / f"debug_responses_{short}.json"
             with open(debug_path, "w") as f:
                 json.dump(debug_log, f, indent=2, ensure_ascii=False)
             print(f"\n  Debug responses saved → {debug_path}")
-
-        del model, processor
-        gc.collect()
-        torch.cuda.empty_cache()
-        print(f"\n  {short} unloaded.")
     else:
         print("  All mitigations already computed — skipping inference.")
         if args.debug:
@@ -673,9 +805,8 @@ for target_model in target_models:
 
 # ── Cross-model delta chart (only when evaluating multiple models) ────────────
 if len(target_models) > 1:
-    mit_names   = list(MITIGATIONS.keys())
-    short_names = [tm.split("/")[-1] for tm in target_models]
-    x     = np.arange(len(mit_names))
+    mit_names = list(MITIGATIONS.keys())
+    x         = np.arange(len(mit_names))
     width = 0.8 / len(target_models)
 
     fig, ax = plt.subplots(figsize=(12, 5))

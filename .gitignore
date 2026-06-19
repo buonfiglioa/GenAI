@@ -10,6 +10,8 @@ wheels/
 .venv
 data/*
 !data/corrupted_dataset.json
+!data/benchmark_results.json
+!data/mitigation_results.json
 !data/figures/
 data/figures/*
 !data/figures/final/
