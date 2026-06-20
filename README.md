@@ -8,7 +8,7 @@ PoliTO Master's course exercise. Builds and benchmarks a dataset of unanswerable
 |---|---|
 | `download_data.py` | Download QA annotations + images from HuggingFace → `data/` |
 | `pypart1.py` | Corrupt DocVQA questions → judge with Qwen2.5-VL-7B → `data/corrupted_dataset.json` |
-| `pypart2.py` | Benchmark Gemma-3-4b, Gemma-3-12b, SmolVLM, Qwen2.5-VL-3B, InternVL3-4B → `data/benchmark_results.json` + plots |
+| `pypart2.py` | Benchmark Gemma-3-4b, Gemma-3-12b, SmolVLM, Qwen2.5-VL-3B, Gemma-4-E2B → `data/benchmark_results.json` + plots |
 | `pypart3.py` | Prompt-engineering mitigations on all benchmarked models → `data/mitigation_results.json` + plots |
 | `plot_results.py` | Standalone: regenerate final figures from JSON results, no model loading → `data/figures/final/` |
 
@@ -18,7 +18,9 @@ PoliTO Master's course exercise. Builds and benchmarks a dataset of unanswerable
 uv sync
 uv run python download_data.py        # one-time data download
 uv run python pypart1.py              # requires data/docvqa_val.json + data/images/
+uv run python pypart1.py --force      # delete cached candidates/dataset and rerun from scratch
 uv run python pypart2.py              # requires data/corrupted_dataset.json (output of pypart1)
+uv run python pypart2.py --force      # delete cached results and rerun all models from scratch
 uv run python pypart3.py              # all models
 uv run python pypart3.py --model google/gemma-3-12b-it        # single model
 uv run python pypart3.py --debug                              # log raw responses for bias analysis
