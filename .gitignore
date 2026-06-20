@@ -13,7 +13,8 @@ data/*
 !data/benchmark_results.json
 !data/mitigation_results.json
 !data/figures/
-data/figures/*
 !data/figures/final/
 qas.zip
 data_old/*
+
+*zip
