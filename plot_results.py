@@ -12,6 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.scale as mscale
 import numpy as np
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ def variant_labels(variants: dict) -> list[str]:
 
 # ── Plot 1: Answerable vs Unanswerable recall per model ───────────────────────
 
-fig, axes = plt.subplots(1, len(MODELS), figsize=(7 * len(MODELS), 5), sharey=True)
+fig, axes = plt.subplots(1, len(MODELS), figsize=(5 * len(MODELS), 5), sharey=True)
 
 for ax, model in zip(axes, MODELS):
     variants = all_variants(model)
@@ -102,14 +103,14 @@ for ax, model in zip(axes, MODELS):
                color="#DD8452", linestyle="--", linewidth=0.9, alpha=0.5)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
-    ax.set_ylim(0, 1.12)
-    ax.set_ylabel("Recall")
-    ax.set_title(short(model))
-    ax.legend(fontsize=8)
+    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=10)
+    ax.set_ylim(0, 1.18)
+    ax.set_ylabel("Recall", fontsize=11)
+    ax.set_title(short(model), fontsize=12)
+    ax.legend(fontsize=10)
     ax.grid(axis="y", alpha=0.3)
 
-fig.suptitle("Recall by class across mitigations", fontsize=13, y=1.02)
+fig.suptitle("Recall by class across mitigations", fontsize=15, y=1.02)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "mitigation_recall.jpg", dpi=150, bbox_inches="tight")
 plt.show()
@@ -123,7 +124,7 @@ METRICS = {
     "unanswerable_recall":("Unansw. Rec.", "#ff7f0e"),
 }
 
-fig, axes = plt.subplots(1, len(MODELS), figsize=(7 * len(MODELS), 4.5), sharey=True)
+fig, axes = plt.subplots(1, len(MODELS), figsize=(5 * len(MODELS), 5), sharey=True)
 
 for ax, model in zip(axes, MODELS):
     variants = all_variants(model)
@@ -131,16 +132,16 @@ for ax, model in zip(axes, MODELS):
 
     for key, (label, color) in METRICS.items():
         values = [variants[k][key] for k in variants]
-        ax.plot(labels, values, marker="o", label=label, color=color)
+        ax.plot(labels, values, marker="o", label=label, color=color, linewidth=1.8, markersize=6)
 
-    ax.set_ylim(0.4, 1.05)
-    ax.set_ylabel("Score")
-    ax.set_title(short(model))
-    ax.legend(fontsize=8, loc="lower right")
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Score", fontsize=11)
+    ax.set_title(short(model), fontsize=12)
+    ax.legend(fontsize=10, loc="lower right")
     ax.grid(alpha=0.3)
-    plt.setp(ax.get_xticklabels(), rotation=20, ha="right", fontsize=9)
+    plt.setp(ax.get_xticklabels(), rotation=25, ha="right", fontsize=10)
 
-fig.suptitle("Key metrics across mitigations", fontsize=13, y=1.02)
+fig.suptitle("Key metrics across mitigations", fontsize=15, y=1.02)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "mitigation_metrics.jpg", dpi=150, bbox_inches="tight")
 plt.show()
@@ -148,7 +149,7 @@ print(f"Saved → {FIGURES_DIR}/mitigation_metrics.jpg")
 
 # ── Plot 3: Per-type unanswerable recall heatmap per model ────────────────────
 
-fig, axes = plt.subplots(1, len(MODELS), figsize=(6 * len(MODELS), 5))
+fig, axes = plt.subplots(1, len(MODELS), figsize=(5 * len(MODELS), 5))
 
 for ax, model in zip(axes, MODELS):
     variants = all_variants(model)
@@ -162,21 +163,21 @@ for ax, model in zip(axes, MODELS):
     im = ax.imshow(matrix, vmin=0, vmax=1, cmap="RdYlGn", aspect="auto")
 
     ax.set_xticks(range(len(CORRUPTION_TYPES)))
-    ax.set_xticklabels(CORRUPTION_TYPES, rotation=35, ha="right", fontsize=8)
+    ax.set_xticklabels(CORRUPTION_TYPES, rotation=40, ha="right", fontsize=10)
     ax.set_yticks(range(len(row_labels)))
-    ax.set_yticklabels(row_labels, fontsize=9)
+    ax.set_yticklabels(row_labels, fontsize=11)
 
     for i in range(len(row_labels)):
         for j, ct in enumerate(CORRUPTION_TYPES):
             v = matrix[i][j]
             text = f"{v:.2f}" if not math.isnan(v) else "—"
-            ax.text(j, i, text, ha="center", va="center", fontsize=8,
+            ax.text(j, i, text, ha="center", va="center", fontsize=10,
                     color="black" if 0.3 < v < 0.8 else "white" if math.isnan(v) else "black")
 
     plt.colorbar(im, ax=ax, label="Unanswerable recall", fraction=0.046, pad=0.04)
-    ax.set_title(short(model), fontsize=10)
+    ax.set_title(short(model), fontsize=12)
 
-fig.suptitle("Unanswerable recall by mitigation and corruption type", fontsize=13, y=1.02)
+fig.suptitle("Unanswerable recall by mitigation and corruption type", fontsize=15, y=1.02)
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "mitigation_by_type.jpg", dpi=150, bbox_inches="tight")
 plt.show()
@@ -187,7 +188,7 @@ print(f"Saved → {FIGURES_DIR}/mitigation_by_type.jpg")
 x     = np.arange(len(MITIGATIONS))
 width = 0.8 / len(MODELS)
 
-fig, ax = plt.subplots(figsize=(9, 5))
+fig, ax = plt.subplots(figsize=(12, 5.5))
 
 for i, model in enumerate(MODELS):
     base_urec = benchmark[model]["unanswerable_recall"]
@@ -202,16 +203,35 @@ for i, model in enumerate(MODELS):
     for bar, delta in zip(bars, deltas):
         if not math.isnan(delta):
             ax.text(bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() + (0.005 if delta >= 0 else -0.015),
-                    f"{delta:+.3f}", ha="center", va="bottom", fontsize=7.5)
+                    bar.get_height() + (0.005 if delta >= 0 else -0.018),
+                    f"{delta:+.3f}", ha="center", va="bottom", fontsize=8.5)
 
 ax.axhline(0, color="black", linewidth=0.9)
 ax.set_xticks(x)
-ax.set_xticklabels([MITIGATION_LABELS[m] for m in MITIGATIONS], rotation=15, ha="right")
-ax.set_ylabel("Δ Unanswerable Recall vs Baseline")
-ax.set_title("Mitigation impact by model — cross-model comparison")
-ax.legend()
+ax.set_xticklabels([MITIGATION_LABELS[m] for m in MITIGATIONS], rotation=15, ha="right", fontsize=11)
+ax.set_ylabel("Δ Unanswerable Recall vs Baseline", fontsize=12)
+ax.set_title("Mitigation impact by model — cross-model comparison", fontsize=14)
+ax.legend(fontsize=10)
 ax.grid(axis="y", alpha=0.3)
+
+# Piecewise-linear scale: 25% visual space for [-1, 0], 75% for [0, 0.35]
+_NEG, _POS, _SPLIT = 1.0, 0.25, 0.25
+
+def _fwd(y):
+    y = np.asarray(y, dtype=float)
+    return np.where(y <= 0,
+                    _SPLIT * (1 + y / _NEG),
+                    _SPLIT + (1 - _SPLIT) * y / _POS)
+
+def _inv(t):
+    t = np.asarray(t, dtype=float)
+    return np.where(t <= _SPLIT,
+                    (t / _SPLIT - 1) * _NEG,
+                    (t - _SPLIT) / (1 - _SPLIT) * _POS)
+
+ax.set_yscale(mscale.FuncScale(ax.yaxis, (_fwd, _inv)))
+ax.set_ylim(-_NEG, _POS)
+ax.set_yticks([-1.0, -0.75, -0.5, -0.25, 0, 0.1, 0.2])
 plt.tight_layout()
 plt.savefig(FIGURES_DIR / "mitigation_delta_crossmodel.jpg", dpi=150)
 plt.show()
